@@ -16,11 +16,14 @@ import sqlite3
 import datetime
 import os
 import threading
+import time
+from social import Social, SocialError
 
 HOST = os.environ.get("DODGE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", os.environ.get("DODGE_PORT", "8765")))
 DB_FILE = os.environ.get("DODGE_DB", "leaderboard.db")
 DB_LOCK = threading.Lock()
+SOCIAL = None
 
 
 def month_key(dt=None):
@@ -183,6 +186,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/v2/health":
+                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 2, "match_available": False})
             if parsed.path == "/health":
                 rollover_if_needed()
                 return self.send_json(200, {"ok": True, "month": month_key()})
@@ -197,13 +202,28 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             length = min(65536, int(self.headers.get("Content-Length", "0")))
+            if length < 0:
+                return self.send_json(400, {"ok": False, "error": "invalid length"})
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             parsed = urlparse(self.path)
+            if parsed.path == "/v2/register":
+                with SOCIAL.lock:
+                    return self.send_json(200, SOCIAL.register())
+            if parsed.path == "/v2/action":
+                auth = self.headers.get("Authorization", "")
+                if not auth.startswith("Bearer "):
+                    raise SocialError("unauthorized")
+                action, data = payload.get("action"), payload.get("data", {})
+                if not isinstance(action, str) or not isinstance(data, dict):
+                    return self.send_json(400, {"ok": False, "error": "invalid request"})
+                return self.send_json(200, SOCIAL.dispatch(auth[7:], action, data))
             if parsed.path == "/submit":
                 return self.send_json(200, submit(payload))
             if parsed.path == "/claim":
                 return self.send_json(200, claim(payload))
             return self.send_json(404, {"ok": False, "error": "not found"})
+        except SocialError as e:
+            self.send_json(401 if str(e) == "unauthorized" else 409, {"ok": False, "error": str(e)})
         except (ValueError, json.JSONDecodeError) as e:
             self.send_json(400, {"ok": False, "error": str(e)})
         except Exception as e:
@@ -215,6 +235,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    SOCIAL = Social(os.environ.get("DODGE_SOCIAL_DB", "social.db"))
     print(f"Dodge leaderboard server: http://{HOST}:{PORT}")
     print("Top 100 monthly rewards: #1=2000, #2=1500, #3=1000, #4-100=700")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+
