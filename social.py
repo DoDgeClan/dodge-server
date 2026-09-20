@@ -129,7 +129,14 @@ class Social:
             elif action == 'create':
                 rid, room = self.room_for(uid)
                 if room is None:
-                    self.rooms[secrets.token_hex(12)] = {'host': uid, 'members': [uid]}
+                    self.rooms[secrets.token_hex(12)] = {'host': uid, 'members': [uid], 'started': False}
+            elif action == 'start_match':
+                rid, room = self.room_for(uid)
+                if not room:
+                    raise SocialError('room_required')
+                if room['host'] != uid:
+                    raise SocialError('host_only')
+                room['started'] = True
             elif action == 'invite':
                 rid, room = self.room_for(uid)
                 other = data.get('id')
@@ -173,6 +180,6 @@ class Social:
             return {'ok': True, 'profile': self.profile(uid),
                     'friends': [dict(self.profile(u), online=self.connected(u)) for u in self.friend_ids(uid)],
                     'requests': [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0', (uid,))],
-                    'room': None if room is None else {'id': rid, 'host': room['host'], 'members': [self.profile(u) for u in room['members']]},
+                    'room': None if room is None else {'id': rid, 'host': room['host'], 'started': bool(room.get('started')), 'members': [self.profile(u) for u in room['members']]},
                     'invites': [dict(id=k, name=self.profile(v['from'])['name'], remaining=max(0, v['expires']-self.clock())) for k,v in self.invites.items() if v['to'] == uid]}
 
