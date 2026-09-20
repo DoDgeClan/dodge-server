@@ -18,12 +18,14 @@ import os
 import threading
 import time
 from social import Social, SocialError
+from multiplayer_ws import MatchHub, websocket_loop
 
 HOST = os.environ.get("DODGE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", os.environ.get("DODGE_PORT", "8765")))
 DB_FILE = os.environ.get("DODGE_DB", "leaderboard.db")
 DB_LOCK = threading.Lock()
 SOCIAL = None
+MATCHES = MatchHub()
 
 
 def month_key(dt=None):
@@ -186,8 +188,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/ws" and self.headers.get("Upgrade", "").lower() == "websocket":
+                websocket_loop(self, MATCHES, SOCIAL)
+                return
             if parsed.path == "/v2/health":
-                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 2, "match_available": False})
+                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 3, "match_available": True, "websocket": "/ws"})
             if parsed.path == "/health":
                 rollover_if_needed()
                 return self.send_json(200, {"ok": True, "month": month_key()})
