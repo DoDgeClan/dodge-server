@@ -134,6 +134,10 @@ class Social:
                 rid, room = self.room_for(uid)
                 if not room:
                     raise SocialError('room_required')
+                if room['host'] != uid:
+                    raise SocialError('host_only')
+                if len(room['members']) < 2:
+                    raise SocialError('need_teammate')
                 room['started'] = True
             elif action == 'invite':
                 rid, room = self.room_for(uid)
@@ -180,4 +184,3 @@ class Social:
                     'requests': [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0', (uid,))],
                     'room': None if room is None else {'id': rid, 'host': room['host'], 'started': bool(room.get('started')), 'members': [self.profile(u) for u in room['members']]},
                     'invites': [dict(id=k, name=self.profile(v['from'])['name'], remaining=max(0, v['expires']-self.clock())) for k,v in self.invites.items() if v['to'] == uid]}
-
