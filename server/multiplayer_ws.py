@@ -76,6 +76,10 @@ class MatchHub:
                         if math.hypot(enemy["x"]-other["x"], enemy["y"]-other["y"]) <= .13:
                             room["enemies"].remove(enemy); killed += 1; break
                 player["kills"] += killed
+            elif action == "shield":
+                player["invulnerable_until"] = max(player.get("invulnerable_until", 0.0), time.monotonic() + 3.0)
+            elif action == "dash":
+                player["invulnerable_until"] = max(player.get("invulnerable_until", 0.0), time.monotonic() + .4)
             self._tick(room)
             return self.snapshot(room_id)
 
