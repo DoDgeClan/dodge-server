@@ -134,8 +134,6 @@ class Social:
                 rid, room = self.room_for(uid)
                 if not room:
                     raise SocialError('room_required')
-                if room['host'] != uid:
-                    raise SocialError('host_only')
                 room['started'] = True
             elif action == 'invite':
                 rid, room = self.room_for(uid)
