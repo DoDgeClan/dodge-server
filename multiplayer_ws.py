@@ -146,8 +146,10 @@ def websocket_loop(handler, hub, social):
                 message=""
             if message is None:break
             if message:
-                try:hub.action(room_id,uid,json.loads(message))
-            except (ValueError,TypeError):pass
+                try:
+                    hub.action(room_id,uid,json.loads(message))
+                except (ValueError,TypeError):
+                    pass
             write_frame(conn,json.dumps(hub.snapshot(room_id),separators=(",",":")))
     finally:
         hub.leave(room_id,uid)
