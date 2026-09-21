@@ -36,7 +36,7 @@ class MatchHub:
                 room["host_uid"] = host_uid
             if uid not in room["players"] and len(room["players"]) >= 3:
                 raise ValueError("room_full")
-            room["players"].setdefault(uid, {"x": 0.5, "y": 0.5, "dir": "idle", "hp": 3, "max_hp": 3, "kills": 0, "invulnerable_until": 0.0})
+            room["players"].setdefault(uid, {"x": 0.5, "y": 0.5, "dir": "idle", "hp": 3, "max_hp": 3, "kills": 0, "invulnerable_until": 0.0, "spectator": False})
             if expected_members and uid not in expected_members:
                 raise ValueError("not_in_room")
             room['requested'] = room['requested'] or started
@@ -63,7 +63,7 @@ class MatchHub:
             player = room["players"][uid]
             action = message.get("action")
             now = time.monotonic()
-            if room['ended'] or player['hp'] <= 0:
+            if room['ended']:
                 return self.snapshot(room_id)
             if action == "start":
                 if uid != room.get("host_uid"):
@@ -110,6 +110,8 @@ class MatchHub:
                         distance = max(.001, distance)
                         enemy['x'] = max(.02, min(.98, enemy['x']+dx/distance*.15))
                         enemy['y'] = max(.02, min(.98, enemy['y']+dy/distance*.15))
+            elif action == 'spectate' and player['hp'] <= 0:
+                player['spectator'] = True
             self._tick(room)
             return self.snapshot(room_id)
 
@@ -137,7 +139,7 @@ class MatchHub:
             target = min(list(room['decoys'].values()) or targets, key=lambda p: math.hypot(enemy["x"]-p["x"], enemy["y"]-p["y"]))
             dx,dy=target["x"]-enemy["x"],target["y"]-enemy["y"]
             dist=max(1e-5,math.hypot(dx,dy));speed=.075 if enemy["type"] == "tank" else .10;enemy["x"]+=dx/dist*speed*dt;enemy["y"]+=dy/dist*speed*dt
-            if 'hp' in target and dist < .065 and now >= target.get("invulnerable_until", 0):
+            if 'hp' in target and dist < .105 and now >= target.get("invulnerable_until", 0):
                 if now < target.get('shield_until', 0): target['shield_until'] = 0
                 else: target["hp"] = max(0, target["hp"]-1)
                 target["invulnerable_until"] = now+.85
