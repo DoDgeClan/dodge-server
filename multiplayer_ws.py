@@ -25,12 +25,16 @@ class MatchHub:
 
     def join(self, room_id, uid, host_uid=None, started=False, expected_members=None):
         with self.lock:
+            now=time.monotonic()
+            for rid,existing in list(self.rooms.items()):
+                if not any(p.get('connected',True) for p in existing['players'].values()) and now-existing.get('last_connection',now)>30:
+                    self.rooms.pop(rid,None)
             room = self.rooms.setdefault(room_id, {
                 "started": False, "updated": time.monotonic(),
                 "started_at": 0.0, "players": {}, "enemies": [], "next_enemy": 0,
                 "ended": False, "victory": False, "reason": "", "host_uid": host_uid or uid,
                 "expected": list(expected_members or []), "requested": False,
-                "decoys": {},
+                "decoys": {}, "connections": {}, "last_connection": now,
             })
             if host_uid:
                 room["host_uid"] = host_uid
@@ -39,6 +43,10 @@ class MatchHub:
             room["players"].setdefault(uid, {"x": 0.5, "y": 0.5, "dir": "idle", "hp": 3, "max_hp": 3, "kills": 0, "invulnerable_until": 0.0, "spectator": False})
             if expected_members and uid not in expected_members:
                 raise ValueError("not_in_room")
+            player=room['players'][uid]
+            player['connected']=True;player.pop('disconnected_at',None)
+            room['connections'][uid]=room['connections'].get(uid,0)+1
+            room['last_connection']=now
             room['requested'] = room['requested'] or started
             if room['requested'] and not room['started'] and all(u in room['players'] for u in room['expected']):
                 room["started"] = True
@@ -51,9 +59,11 @@ class MatchHub:
             room = self.rooms.get(room_id)
             if not room:
                 return
-            room["players"].pop(uid, None)
-            if not room["players"]:
-                self.rooms.pop(room_id, None)
+            room['connections'][uid]=max(0,room['connections'].get(uid,1)-1)
+            if not room['connections'][uid] and uid in room['players']:
+                room['players'][uid]['connected']=False
+                room['players'][uid]['disconnected_at']=time.monotonic()
+            room['last_connection']=time.monotonic()
 
     def action(self, room_id, uid, message):
         with self.lock:
@@ -64,6 +74,8 @@ class MatchHub:
             action = message.get("action")
             now = time.monotonic()
             if room['ended']:
+                return self.snapshot(room_id)
+            if player['hp']<=0 and action!='spectate':
                 return self.snapshot(room_id)
             if action == "start":
                 if uid != room.get("host_uid"):
@@ -130,11 +142,14 @@ class MatchHub:
             etype = "tank" if elapsed >= 45 and random.random() < .18 else "normal"
             hp = 3 if etype == "tank" else 1
             room["enemies"].append({"id": random.randrange(1_000_000_000), "x": .5+math.cos(angle)*.48, "y": .5+math.sin(angle)*.42, "type": etype, "hp": hp, "max_hp": hp, "dir": "idle"})
-        targets = [p for p in room["players"].values() if p['hp'] > 0]
+        for uid,player in list(room['players'].items()):
+            if not player.get('connected',True) and now-player.get('disconnected_at',now)>20:
+                room['players'].pop(uid,None);room['connections'].pop(uid,None)
+        targets = [p for p in room['players'].values() if p['hp']>0 and p.get('connected',True)]
         room['decoys'] = {u:d for u,d in room['decoys'].items() if d['until'] > now}
         if not targets:
-            room['ended'] = True; room['reason'] = 'The whole team was defeated'
-            return
+            if any(p['hp']>0 for p in room['players'].values()):return
+            room['ended']=True;room['reason']='The whole team was defeated';return
         for enemy in room["enemies"]:
             target = min(list(room['decoys'].values()) or targets, key=lambda p: math.hypot(enemy["x"]-p["x"], enemy["y"]-p["y"]))
             dx,dy=target["x"]-enemy["x"],target["y"]-enemy["y"]
@@ -243,7 +258,11 @@ def websocket_loop(handler, hub, social):
     try:
         while True:
             with social.lock:
-                if social.room_for(uid)[0] != room_id: break
+                if social.room_for(uid)[0] != room_id:
+                    with hub.lock:
+                        match=hub.rooms.get(room_id)
+                        if match:match['players'].pop(uid,None)
+                    break
                 social.online[uid] = social.clock()
             message=reader.read(conn)
             if message is None:break
@@ -257,3 +276,4 @@ def websocket_loop(handler, hub, social):
         pass
     finally:
         hub.leave(room_id,uid)
+
