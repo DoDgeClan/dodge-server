@@ -29,7 +29,7 @@ MATCHES = MatchHub()
 
 
 def month_key(dt=None):
-    dt = dt or datetime.datetime.utcnow()
+    dt = dt or datetime.datetime.now(datetime.timezone.utc)
     return dt.strftime("%Y-%m")
 
 
@@ -124,7 +124,7 @@ def submit(payload):
     rank_index = max(-1, min(100, int(payload.get("rank_index", -1))))
     if not uid:
         raise ValueError("uid required")
-    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
     with DB_LOCK, db() as con:
         old = con.execute("SELECT score,rank_index FROM scores WHERE uid=?", (uid,)).fetchone()
@@ -192,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
                 websocket_loop(self, MATCHES, SOCIAL)
                 return
             if parsed.path == "/v2/health":
-                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 3, "match_available": True, "websocket": "/ws"})
+                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 4, "match_available": True, "websocket": "/ws", "reconnect_grace": 20})
             if parsed.path == "/health":
                 rollover_if_needed()
                 return self.send_json(200, {"ok": True, "month": month_key()})
@@ -235,7 +235,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(500, {"ok": False, "error": str(e)})
 
     def log_message(self, fmt, *args):
-        print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+        import re
+        message=re.sub(r"([?&]token=)[^&\s]+",r"\1[redacted]",fmt % args)
+        print("[%s] %s" % (self.log_date_time_string(),message),flush=True)
 
 
 if __name__ == "__main__":
@@ -244,4 +246,5 @@ if __name__ == "__main__":
     print(f"Dodge leaderboard server: http://{HOST}:{PORT}")
     print("Top 100 monthly rewards: #1=2000, #2=1500, #3=1000, #4-100=700")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+
 
