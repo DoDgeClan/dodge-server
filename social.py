@@ -70,7 +70,7 @@ class Social:
         return dict(row) if row else None
 
     def connected(self, uid):
-        return self.clock() - self.online.get(uid, float('-inf')) < 15
+        return self.clock() - self.online.get(uid, float('-inf')) < 30
 
     def cleanup(self):
         now = self.clock()
@@ -129,7 +129,24 @@ class Social:
             elif action == 'create':
                 rid, room = self.room_for(uid)
                 if room is None:
-                    self.rooms[secrets.token_hex(12)] = {'host': uid, 'members': [uid], 'started': False}
+                    self.rooms[secrets.token_hex(12)] = {'host': uid, 'members': [uid], 'started': False, 'ready': {uid: False}}
+            elif action == 'join':
+                code=str(data.get('code','')).strip()
+                room=self.rooms.get(code)
+                if room is None:raise SocialError('room_not_found')
+                current_id,current=self.room_for(uid)
+                if current_id==code:pass
+                elif current is not None:raise SocialError('player_busy')
+                elif room.get('started'):raise SocialError('room_started')
+                elif len(room['members'])>=3:raise SocialError('room_full')
+                else:
+                    room['members'].append(uid);room.setdefault('ready',{})[uid]=False
+            elif action == 'ready':
+                _,room=self.room_for(uid)
+                if not room:raise SocialError('room_required')
+                if room.get('started'):raise SocialError('room_started')
+                if not isinstance(data.get('ready'),bool):raise SocialError('invalid_request')
+                room.setdefault('ready',{})[uid]=data['ready'];room['ready_required']=True
             elif action == 'start_match':
                 rid, room = self.room_for(uid)
                 if not room:
@@ -138,12 +155,17 @@ class Social:
                     raise SocialError('host_only')
                 if len(room['members']) < 2:
                     raise SocialError('need_teammate')
+                # Older protocol-3 clients have no readiness button. Enforce
+                # readiness only after a player explicitly opts into that flow.
+                if room.get('ready_required') and not all(room['ready'].get(u,False) for u in room['members']):
+                    raise SocialError('team_not_ready')
                 room['started'] = True
             elif action == 'invite':
                 rid, room = self.room_for(uid)
                 other = data.get('id')
                 if not room or room['host'] != uid:
                     raise SocialError('host_only')
+                if room.get('started'):raise SocialError('room_started')
                 if len(room['members']) >= 3:
                     raise SocialError('room_full')
                 if other not in self.friend_ids(uid) or not self.connected(other):
@@ -166,15 +188,16 @@ class Social:
                     room = self.rooms.get(invite['room'])
                     if not room or invite['from'] not in room['members']:
                         raise SocialError('invite_expired')
+                    if room.get('started'):raise SocialError('room_started')
                     if len(room['members']) >= 3:
                         raise SocialError('room_full')
                     if self.room_for(uid)[1] is not None:
                         raise SocialError('player_busy')
-                    room['members'].append(uid)
+                    room['members'].append(uid);room.setdefault('ready',{})[uid]=False
             elif action == 'leave':
                 _, room = self.room_for(uid)
                 if room:
-                    room['members'].remove(uid)
+                    room['members'].remove(uid);room.get('ready',{}).pop(uid,None)
                 self.cleanup()
             elif action != 'poll':
                 raise SocialError('unknown_action')
@@ -182,5 +205,6 @@ class Social:
             return {'ok': True, 'profile': self.profile(uid),
                     'friends': [dict(self.profile(u), online=self.connected(u)) for u in self.friend_ids(uid)],
                     'requests': [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0', (uid,))],
-                    'room': None if room is None else {'id': rid, 'host': room['host'], 'started': bool(room.get('started')), 'members': [self.profile(u) for u in room['members']]},
+                    'room': None if room is None else {'id': rid, 'host': room['host'], 'started': bool(room.get('started')), 'code':rid,'ready':{u:room.get('ready',{}).get(u,False) for u in room['members']},'members': [self.profile(u) for u in room['members']]},
                     'invites': [dict(id=k, name=self.profile(v['from'])['name'], remaining=max(0, v['expires']-self.clock())) for k,v in self.invites.items() if v['to'] == uid]}
+
