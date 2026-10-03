@@ -70,6 +70,16 @@ class ChatTests(unittest.TestCase):
         with self.assertRaisesRegex(SocialError,'invalid_style'):self.act(0,'chat_preferences',style=50)
         with self.assertRaisesRegex(SocialError,'invalid_preference'):self.act(0,'chat_preferences',requests='false')
 
+    def test_result_card_validation_and_cumulative_quest(self):
+        card={'score':125,'seconds':42,'mode':'endless'}
+        self.send(0,'result001',kind='result',text=json.dumps(card))
+        received=self.chat(1,'chat_fetch',0)
+        self.assertEqual(json.loads(received['messages'][0]['text']),card)
+        self.assertEqual(received['quest']['shared_results'],1)
+        for i,invalid in enumerate((dict(card,score=True),dict(card,seconds=float('nan')),dict(card,mode=['bad']),dict(card,seconds=-1))):
+            with self.assertRaisesRegex(SocialError,'invalid_result'):
+                self.send(0,'invalidcard'+str(i),kind='result',text=json.dumps(invalid))
+
     def test_push_payload_language_privacy_mute_quiet_and_no_repeat(self):
         from push import Push
         class Session:

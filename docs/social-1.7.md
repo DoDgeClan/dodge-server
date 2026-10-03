@@ -8,7 +8,7 @@ Chat uses authenticated /v2/action, POST /v2/upload/photo|voice, GET /v2/media/<
 
 Style ids are validated, sender style snapshot is persisted, but cosmetic coin ownership remains client-side; server wallet verification is not implemented. Shared quest counts client-reported result cards, not authoritative battle completions. Reports are persisted; no moderation dashboard.
 
-26 local server regression tests passed. Real local HTTP two-account chat/media/access tests passed; fake FCM provider checks payload only. No live 1.7 Render deployment or Android closed-app push test.
+27 local server regression tests passed. Real local HTTP two-account chat/media/access tests passed; fake FCM provider checks payload only. No live 1.7 Render deployment or Android closed-app push test.
 
 Full Russian audit, phone checklist and all changed client files: https://github.com/DoDgeClan/DodgeTheEnemies-Kivy/blob/feature/social-pixel-1.7/docs/audit-1.7.md
 

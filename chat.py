@@ -1,7 +1,7 @@
 """Persistent private friend conversations. All methods run under Social.lock.
 Streak dates use Asia/Qyzylorda (UTC+05), never client clocks.
 """
-import json, time, uuid, io, struct, os
+import json, time, uuid, io, struct, os, math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from social import SocialError
@@ -128,7 +128,8 @@ class Chat:
                 self.social.dispatch_by_uid_invite(uid,other);text=rid
             if kind=='result':
                 result=json.loads(text)
-                if set(result)-{'score','seconds','mode'} or not isinstance(result.get('score'),int) or not 0<=result['score']<=10000000:raise SocialError('invalid_result')
+                if not isinstance(result,dict) or set(result)!={'score','seconds','mode'} or type(result.get('score')) is not int or not 0<=result['score']<=10000000:raise SocialError('invalid_result')
+                if type(result['seconds']) not in (int,float) or not math.isfinite(result['seconds']) or not 0<=result['seconds']<=604800 or not isinstance(result['mode'],str) or not 1<=len(result['mode'])<=32:raise SocialError('invalid_result')
             reply=data.get('reply');reply=int(reply) if reply else None
             if reply:self.row(uid,reply,key)
             style=self.prefs(uid)['style']
