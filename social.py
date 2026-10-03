@@ -35,6 +35,8 @@ class Social:
         self.rooms = {}
         self.invites = {}
         self.last_invite = {}
+        from chat import Chat
+        self.chat=Chat(self)
 
     @staticmethod
     def name_key(name):
@@ -67,7 +69,7 @@ class Social:
 
     def profile(self, uid):
         row = self.db.execute('SELECT id,name,name_locked FROM guests WHERE id=?', (uid,)).fetchone()
-        return dict(row) if row else None
+        return dict(row,avatar=self.chat.prefs(uid)['avatar']) if row else None
 
     def connected(self, uid):
         return self.clock() - self.online.get(uid, float('-inf')) < 30
@@ -94,12 +96,23 @@ class Social:
         rows = self.db.execute('SELECT sender,recipient FROM friends WHERE accepted=1 AND (sender=? OR recipient=?)', (uid, uid))
         return [r['recipient'] if r['sender'] == uid else r['sender'] for r in rows]
 
+    def dispatch_requests(self,uid):
+        return [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0',(uid,))]
+
+    def dispatch_by_uid_invite(self,uid,other):
+        rid,room=self.room_for(uid)
+        if not room or room['host']!=uid or room.get('started') or len(room['members'])>=3:raise SocialError('room_required')
+        if self.clock()-self.last_invite.get(uid,float('-inf'))<10:raise SocialError('invite_cooldown')
+        self.last_invite[uid]=self.clock();self.invites[secrets.token_hex(12)]={'from':uid,'to':other,'room':rid,'expires':self.clock()+10}
+
     def dispatch(self, token, action, data=None):
         data = data or {}
         with self.lock, self.db:
             uid = self.authenticate(token)
             self.cleanup()
             self.online[uid] = self.clock()
+            if action.startswith('chat_'):
+                return dict(ok=True,**self.chat.dispatch(uid,action,data))
             if action == 'name':
                 name, key = self.name_key(data.get('name', ''))
                 if self.profile(uid)['name_locked']:
@@ -114,15 +127,22 @@ class Social:
                 if not other or other['id'] == uid:
                     raise SocialError('player_not_found')
                 other = other['id']
+                if not self.chat.prefs(other)['requests']:raise SocialError('requests_disabled')
+                if self.chat.blocked(uid,other):raise SocialError('blocked')
+                if self.db.execute("SELECT COUNT(*) FROM chat_events WHERE kind='friend_notifications' AND payload LIKE ? AND created>?",('%'+uid+'%',self.chat.clock()-3600)).fetchone()[0]>=30:raise SocialError('request_rate_limit')
                 if len(self.friend_ids(uid)) >= 100:
                     raise SocialError('friends_full')
                 existing = self.db.execute('SELECT 1 FROM friends WHERE sender=? AND recipient=?', (other, uid)).fetchone()
                 if existing:
                     self.db.execute('UPDATE friends SET accepted=1 WHERE sender=? AND recipient=?', (other, uid))
                 else:
-                    self.db.execute('INSERT OR IGNORE INTO friends VALUES (?,?,0)', (uid, other))
+                    inserted=self.db.execute('INSERT OR IGNORE INTO friends VALUES (?,?,0)', (uid, other))
+                    if inserted.rowcount:self.chat.event('friend:'+secrets.token_hex(12),other,'friend_notifications',{'sender':uid})
             elif action == 'friend_accept':
+                if self.chat.blocked(uid,data.get('id')):raise SocialError('blocked')
                 self.db.execute('UPDATE friends SET accepted=1 WHERE sender=? AND recipient=?', (data.get('id'), uid))
+            elif action == 'friend_decline':
+                self.db.execute('DELETE FROM friends WHERE sender=? AND recipient=? AND accepted=0',(data.get('id'),uid))
             elif action == 'friend_remove':
                 other = data.get('id')
                 self.db.execute('DELETE FROM friends WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)', (uid, other, other, uid))
@@ -203,7 +223,7 @@ class Social:
                 raise SocialError('unknown_action')
             rid, room = self.room_for(uid)
             return {'ok': True, 'profile': self.profile(uid),
-                    'friends': [dict(self.profile(u), online=self.connected(u)) for u in self.friend_ids(uid)],
+                    'friends': [dict(self.profile(u), online=self.connected(u) and self.chat.prefs(u)['online']) for u in self.friend_ids(uid)],
                     'requests': [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0', (uid,))],
                     'room': None if room is None else {'id': rid, 'host': room['host'], 'started': bool(room.get('started')), 'code':rid,'ready':{u:room.get('ready',{}).get(u,False) for u in room['members']},'members': [self.profile(u) for u in room['members']]},
                     'invites': [dict(id=k, name=self.profile(v['from'])['name'], remaining=max(0, v['expires']-self.clock())) for k,v in self.invites.items() if v['to'] == uid]}

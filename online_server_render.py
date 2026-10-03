@@ -26,6 +26,7 @@ DB_FILE = os.environ.get("DODGE_DB", "leaderboard.db")
 DB_LOCK = threading.Lock()
 SOCIAL = None
 MATCHES = MatchHub()
+PUSH = None
 
 
 def month_key(dt=None):
@@ -191,8 +192,15 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/ws" and self.headers.get("Upgrade", "").lower() == "websocket":
                 websocket_loop(self, MATCHES, SOCIAL)
                 return
+            if parsed.path.startswith('/v2/media/'):
+                auth=self.headers.get('Authorization','')
+                if not auth.startswith('Bearer '):raise SocialError('unauthorized')
+                with SOCIAL.lock:
+                    uid=SOCIAL.authenticate(auth[7:]);mime,content=SOCIAL.chat.download(uid,parsed.path.rsplit('/',1)[-1])
+                self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(content)))
+                self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(content);return
             if parsed.path == "/v2/health":
-                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 4, "match_available": True, "websocket": "/ws", "reconnect_grace": 20})
+                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 5, "chat_available": True, "streak_timezone": "Asia/Qyzylorda", "push_available": bool(PUSH and PUSH.configured), "match_available": True, "websocket": "/ws", "reconnect_grace": 20})
             if parsed.path == "/health":
                 rollover_if_needed()
                 return self.send_json(200, {"ok": True, "month": month_key()})
@@ -201,12 +209,26 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int(qs.get("limit", [100])[0])
                 return self.send_json(200, {"ok": True, "month": month_key(), "players": leaderboard(limit)})
             return self.send_json(404, {"ok": False, "error": "not found"})
+        except SocialError as e:
+            self.send_json(401 if str(e)=='unauthorized' else 409,{'ok':False,'error':str(e)})
         except Exception as e:
-            self.send_json(500, {"ok": False, "error": str(e)})
+            import logging
+            logging.error('http_error type=%s',type(e).__name__)
+            self.send_json(500, {'ok':False,'error':'server_error'})
 
     def do_POST(self):
         try:
-            length = min(65536, int(self.headers.get("Content-Length", "0")))
+            parsed=urlparse(self.path)
+            length=int(self.headers.get('Content-Length','0'))
+            if parsed.path in ('/v2/upload/photo','/v2/upload/voice'):
+                if not 0<length<=2097152:raise SocialError('media_too_large')
+                auth=self.headers.get('Authorization','')
+                if not auth.startswith('Bearer '):raise SocialError('unauthorized')
+                with SOCIAL.lock,SOCIAL.db:
+                    uid=SOCIAL.authenticate(auth[7:]);content=self.rfile.read(length)
+                    if len(content)!=length:raise SocialError('invalid_media')
+                    return self.send_json(200,dict(ok=True,**SOCIAL.chat.upload(uid,parsed.path.rsplit('/',1)[-1],content)))
+            if not 0<=length<=65536:return self.send_json(413,{'ok':False,'error':'request_too_large'})
             if length < 0:
                 return self.send_json(400, {"ok": False, "error": "invalid length"})
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
@@ -214,6 +236,14 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/v2/register":
                 with SOCIAL.lock:
                     return self.send_json(200, SOCIAL.register())
+            if parsed.path == '/v2/push':
+                auth=self.headers.get('Authorization','')
+                if not auth.startswith('Bearer '):raise SocialError('unauthorized')
+                with SOCIAL.lock:
+                    uid=SOCIAL.authenticate(auth[7:])
+                    if not PUSH or not PUSH.configured:raise SocialError('push_not_configured')
+                    PUSH.register(uid,payload.get('token'))
+                return self.send_json(200,{'ok':True})
             if parsed.path == "/v2/action":
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer "):
@@ -232,7 +262,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as e:
             self.send_json(400, {"ok": False, "error": str(e)})
         except Exception as e:
-            self.send_json(500, {"ok": False, "error": str(e)})
+            import logging
+            logging.error('http_error type=%s',type(e).__name__)
+            self.send_json(500, {'ok':False,'error':'server_error'})
 
     def log_message(self, fmt, *args):
         import re
@@ -243,6 +275,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     init_db()
     SOCIAL = Social(os.environ.get("DODGE_SOCIAL_DB", "social.db"))
+    from push import Push
+    PUSH=Push(SOCIAL);PUSH.start()
     print(f"Dodge leaderboard server: http://{HOST}:{PORT}")
     print("Top 100 monthly rewards: #1=2000, #2=1500, #3=1000, #4-100=700")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
