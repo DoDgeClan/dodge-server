@@ -1,4 +1,4 @@
-# Supabase persistence — staged, not deployed
+# Supabase persistence — separate Free test deployment
 
 Project: `ovrhdtdxfxspacmnoqtd`. The project already existed and is on the
 user's account. No paid resource was created or upgraded.
@@ -9,7 +9,25 @@ Render `dodge-server`, branch `main`, commit
 `1140db8b2d5e1f10b88fd93db1fdc1b27c89790e`, still runs protocol 3 and SQLite.
 The prepared code is based on `feature/social-1.7` at
 `0d65e8dfe264c5d848ad202d185c5b806a028660`, protocol 5. Its private chat
-routes cannot become available until that backend is deployed.
+routes are now available on the separate test deployment described below.
+
+## Separate deployment
+
+Render `dodge-supabase-18`, service `srv-db0t26qd0e5s73d39rn0`, runs
+`feature/supabase-persistence-1.8` at
+`76056ce809d225dc81ef31487a195a5b3d85d275` on the Free plan in Singapore.
+URL: https://dodge-supabase-18.onrender.com. Auto-deploy is disabled.
+Build: `pip install -r requirements.txt`; start: `python online_server_render.py`.
+The session-pooler host was verified in the actual project's Connect dialog:
+`aws-0-ap-northeast-2.pooler.supabase.com:5432`.
+The dedicated `dodge_writer` login uses a private generated password stored
+only in Render environment configuration. It has no superuser, role-creation
+or database-creation permissions. The existing Render service was not changed.
+
+Live HTTPS health confirms protocol 5, chat and matches available, and explicit
+`Asia/Qyzylorda` streak timezone. `push_available` is false: FCM credentials
+are not configured. Android still targets the original server, so installing
+the old APK will not gain the new server functions automatically.
 
 ## Changes
 
@@ -39,6 +57,14 @@ routes cannot become available until that backend is deployed.
 
 ## Real verification on 2026-10-04
 
+- `scripts/check_live_chat.py` passed against the actual HTTPS Render/Supabase
+  deployment with three new test guests. It checked EN/RU and emoji, request
+  acceptance/denial, nonce deduplication, delivery ACK with read receipts off,
+  replies, sender style, mutual-day streak, editing and owner-only deletion,
+  compressed photo delivery, a real AAC/M4A voice file, participant-only media
+  access and blocking/unblocking. Four messages and two media files were
+  confirmed in the actual Supabase tables. This is backend HTTP verification,
+  not interaction with the Android app or push delivery.
 - 31 Python unittest checks pass with SQLite: chat, requests, privacy, media,
   streaks, mock FCM payloads, multiplayer state, DSN validation and import guards.
 - 24 existing application scenarios pass through actual psycopg against local
@@ -95,6 +121,8 @@ python -m unittest discover -v
 it refuses all remote hosts. Never use it against production. The SQL-only
 Supabase verification script rolls back its temporary rows.
 
-No Actions workflow, Render deploy, new APK build or paid-plan change was
-started for this migration. Android delivery, camera/recording, closed-app
-FCM notifications and native 1.8 startup remain separate unverified checks.
+No Actions workflow, new APK build or paid-plan change was started for this
+migration. Only the separately authorized Free test service was deployed.
+Android delivery, camera/recording, closed-app FCM notifications and native 1.8
+startup remain separate unverified checks. The latest native smoke diagnostic
+timed out before DODGE_READY; a successful APK build does not resolve that.
