@@ -13,6 +13,16 @@ routes are now available on the separate test deployment described below.
 
 ## Separate deployment
 
+The candidate now adds `/v2/migrate`. It authenticates a retained guest token
+against the fixed original HTTPS service, then copies the verified identity,
+accepted friends and incoming requests in one transaction. Verified existing
+friend profiles reserve IDs/names until those participants authenticate their
+own tokens; the reservation token field cannot authenticate. Repeated migration
+with an already imported valid token is idempotent. Conflicts or an unavailable
+legacy account fail explicitly, without creating a replacement guest.
+This is per-account recovery, not a complete export of historical leaderboard
+rows or of users whose tokens/data were already lost by the old Free service.
+
 Render `dodge-supabase-18`, service `srv-db0t26qd0e5s73d39rn0`, runs
 `feature/supabase-persistence-1.8` at
 `76056ce809d225dc81ef31487a195a5b3d85d275` on the Free plan in Singapore.

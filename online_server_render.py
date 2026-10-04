@@ -243,6 +243,11 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/v2/register":
                 with SOCIAL.lock:
                     return self.send_json(200, SOCIAL.register())
+            if parsed.path == '/v2/migrate':
+                from legacy import migrate
+                auth=self.headers.get('Authorization','')
+                if not auth.startswith('Bearer '):raise SocialError('unauthorized')
+                return self.send_json(200,migrate(SOCIAL,auth[7:],payload.get('id')))
             if parsed.path == '/v2/push':
                 auth=self.headers.get('Authorization','')
                 if not auth.startswith('Bearer '):raise SocialError('unauthorized')
@@ -287,4 +292,3 @@ if __name__ == "__main__":
     print(f"Dodge leaderboard server: http://{HOST}:{PORT}")
     print("Top 100 monthly rewards: #1=2000, #2=1500, #3=1000, #4-100=700")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
-
