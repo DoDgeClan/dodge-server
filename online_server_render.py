@@ -206,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(content)))
                 self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(content);return
             if parsed.path == "/v2/health":
-                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 5, "chat_available": True, "streak_timezone": "Asia/Qyzylorda", "push_available": bool(PUSH and PUSH.configured), "match_available": True, "websocket": "/ws", "reconnect_grace": 20})
+                return self.send_json(200, {"ok": True, "service": "dodge-server", "protocol": 5, "chat_available": True, "streak_timezone": "Asia/Qyzylorda", "push_available": bool(PUSH and PUSH.configured), "match_available": True, "combat_features": ["boomerang", "reflect"], "combat_revision": 10801, "websocket": "/ws", "reconnect_grace": 20})
             if parsed.path == "/health":
                 rollover_if_needed()
                 return self.send_json(200, {"ok": True, "month": month_key()})
