@@ -3,6 +3,7 @@
 Persistent identities/friendships use SQLite. Room expiry is server authoritative.
 This module does not yet simulate a multiplayer match.
 """
+from database import connect
 import hashlib
 import secrets
 import sqlite3
@@ -19,7 +20,7 @@ class Social:
     def __init__(self, path, clock=time.monotonic):
         self.clock = clock
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = connect(path, persistent=True)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
             CREATE TABLE IF NOT EXISTS guests (
@@ -117,6 +118,8 @@ class Social:
                 name, key = self.name_key(data.get('name', ''))
                 if self.profile(uid)['name_locked']:
                     raise SocialError('name_locked')
+                if self.db.execute('SELECT 1 FROM guests WHERE name_key=? AND id<>?', (key, uid)).fetchone():
+                    raise SocialError('name_taken')
                 try:
                     self.db.execute('UPDATE guests SET name=?,name_key=?,name_locked=1 WHERE id=?', (name, key, uid))
                 except sqlite3.IntegrityError:
@@ -136,7 +139,7 @@ class Social:
                 if existing:
                     self.db.execute('UPDATE friends SET accepted=1 WHERE sender=? AND recipient=?', (other, uid))
                 else:
-                    inserted=self.db.execute('INSERT OR IGNORE INTO friends VALUES (?,?,0)', (uid, other))
+                    inserted=self.db.execute('INSERT INTO friends VALUES (?,?,0) ON CONFLICT DO NOTHING', (uid, other))
                     if inserted.rowcount:self.chat.event('friend:'+secrets.token_hex(12),other,'friend_notifications',{'sender':uid})
             elif action == 'friend_accept':
                 if self.chat.blocked(uid,data.get('id')):raise SocialError('blocked')
@@ -227,4 +230,3 @@ class Social:
                     'requests': [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0', (uid,))],
                     'room': None if room is None else {'id': rid, 'host': room['host'], 'started': bool(room.get('started')), 'code':rid,'ready':{u:room.get('ready',{}).get(u,False) for u in room['members']},'members': [self.profile(u) for u in room['members']]},
                     'invites': [dict(id=k, name=self.profile(v['from'])['name'], remaining=max(0, v['expires']-self.clock())) for k,v in self.invites.items() if v['to'] == uid]}
-

@@ -13,10 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import json
 import sqlite3
+from database import connect
 import datetime
 import os
 import threading
 import time
+from contextlib import contextmanager
 from social import Social, SocialError
 from multiplayer_ws import MatchHub, websocket_loop
 
@@ -34,10 +36,14 @@ def month_key(dt=None):
     return dt.strftime("%Y-%m")
 
 
+@contextmanager
 def db():
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    conn = connect(DB_FILE, timeout=10)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -98,11 +104,11 @@ def rollover_if_needed():
             reward = reward_for_place(place)
             if reward:
                 con.execute(
-                    "INSERT OR IGNORE INTO monthly_rewards(month,uid,name,place,reward,claimed) VALUES(?,?,?,?,?,0)",
+                    "INSERT INTO monthly_rewards(month,uid,name,place,reward,claimed) VALUES(?,?,?,?,?,0) ON CONFLICT DO NOTHING",
                     (stored, player["uid"], player["name"], place, reward),
                 )
         con.execute("DELETE FROM scores")
-        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('current_month',?)", (current,))
+        con.execute("INSERT INTO meta(key,value) VALUES('current_month',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (current,))
 
 
 def leaderboard(limit=100):
@@ -135,7 +141,7 @@ def submit(payload):
         )
         if should_update:
             con.execute(
-                "INSERT OR REPLACE INTO scores(uid,name,score,rank,rank_index,updated_at) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO scores(uid,name,score,rank,rank_index,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET name=excluded.name,score=excluded.score,rank=excluded.rank,rank_index=excluded.rank_index,updated_at=excluded.updated_at",
                 (uid, name, score, rank, rank_index, now),
             )
         else:
@@ -227,7 +233,8 @@ class Handler(BaseHTTPRequestHandler):
                 with SOCIAL.lock,SOCIAL.db:
                     uid=SOCIAL.authenticate(auth[7:]);content=self.rfile.read(length)
                     if len(content)!=length:raise SocialError('invalid_media')
-                    return self.send_json(200,dict(ok=True,**SOCIAL.chat.upload(uid,parsed.path.rsplit('/',1)[-1],content)))
+                    result=dict(ok=True,**SOCIAL.chat.upload(uid,parsed.path.rsplit('/',1)[-1],content))
+                return self.send_json(200,result)
             if not 0<=length<=65536:return self.send_json(413,{'ok':False,'error':'request_too_large'})
             if length < 0:
                 return self.send_json(400, {"ok": False, "error": "invalid length"})
@@ -280,5 +287,4 @@ if __name__ == "__main__":
     print(f"Dodge leaderboard server: http://{HOST}:{PORT}")
     print("Top 100 monthly rewards: #1=2000, #2=1500, #3=1000, #4-100=700")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
-
 

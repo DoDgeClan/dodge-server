@@ -36,9 +36,9 @@ class Chat:
         if other not in self.social.friend_ids(uid):raise SocialError('friend_required')
         if self.blocked(uid,other):raise SocialError('blocked')
         a,b=sorted((uid,other));key=a+':'+b
-        self.db.execute('INSERT OR IGNORE INTO chat_pairs(pair,a,b) VALUES(?,?,?)',(key,a,b));return key
+        self.db.execute('INSERT INTO chat_pairs(pair,a,b) VALUES(?,?,?) ON CONFLICT DO NOTHING',(key,a,b));return key
     def event(self,key,uid,kind,payload):
-        self.db.execute('INSERT OR IGNORE INTO chat_events VALUES(?,?,?,?,?,0)',(key,uid,kind,json.dumps(payload),self.clock()))
+        self.db.execute('INSERT INTO chat_events VALUES(?,?,?,?,?,0) ON CONFLICT DO NOTHING',(key,uid,kind,json.dumps(payload),self.clock()))
     def streak(self,key):
         now=datetime.fromtimestamp(self.clock(),ZoneInfo(TZ));today=now.date();a,b=key.split(':')
         rows=self.db.execute('SELECT day,COUNT(*) FROM chat_days WHERE pair=? GROUP BY day HAVING COUNT(*)=2 ORDER BY day DESC LIMIT 36600',(key,)).fetchall()
@@ -79,14 +79,14 @@ class Chat:
                 if key=='color' and value not in ('orange','blue','green','purple','pink'):raise SocialError('invalid_color')
                 if key=='badge' and value not in ('star','heart','diamond','shield'):raise SocialError('invalid_badge')
                 p[key]=value
-            self.db.execute('INSERT OR REPLACE INTO chat_preferences VALUES(?,?)',(uid,json.dumps(p)));return {'preferences':p,'chats':self.status(uid)}
+            self.db.execute('INSERT INTO chat_preferences VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET data=excluded.data',(uid,json.dumps(p)));return {'preferences':p,'chats':self.status(uid)}
         if action=='chat_list':return {'preferences':self.prefs(uid),'chats':self.status(uid),'requests':self.social.dispatch_requests(uid),'blocked':[self.social.profile(r[0]) for r in self.db.execute('SELECT target FROM chat_blocks WHERE owner=?',(uid,))]}
         other=data.get('friend')
         if action=='chat_unblock':
             self.db.execute('DELETE FROM chat_blocks WHERE owner=? AND target=?',(uid,other));return {'unblocked':True}
         key=self.pair(uid,other)
         if action=='chat_block':
-            self.db.execute('INSERT OR IGNORE INTO chat_blocks VALUES(?,?)',(uid,other));return {'blocked':True}
+            self.db.execute('INSERT INTO chat_blocks VALUES(?,?) ON CONFLICT DO NOTHING',(uid,other));return {'blocked':True}
         if action=='chat_options':
             row=self.db.execute('SELECT settings FROM chat_pairs WHERE pair=?',(key,)).fetchone();settings=json.loads(row[0]);opts=settings.setdefault(uid,{})
             for name in ('pinned','muted'):
@@ -135,9 +135,9 @@ class Chat:
             style=self.prefs(uid)['style']
             mid=self.db.execute('INSERT INTO chat_messages(pair,sender,nonce,kind,text,reply,style,created) VALUES(?,?,?,?,?,?,?,?)',(key,uid,nonce,kind,text,reply,style,self.clock())).lastrowid
             day=datetime.fromtimestamp(self.clock(),ZoneInfo(TZ)).date().isoformat()
-            self.db.execute('INSERT OR IGNORE INTO chat_days VALUES(?,?,?)',(key,day,uid))
+            self.db.execute('INSERT INTO chat_days VALUES(?,?,?) ON CONFLICT DO NOTHING',(key,day,uid))
             if self.streak(key)['days']>=10:
-                for member in key.split(':'):self.db.execute("INSERT OR IGNORE INTO chat_unlocks VALUES(?,'color')",(member,))
+                for member in key.split(':'):self.db.execute("INSERT INTO chat_unlocks VALUES(?,'color') ON CONFLICT DO NOTHING",(member,))
             self.event('message:'+str(mid),other,'messages',{'sender':uid,'text':text if kind=='text' else kind,'pair':key})
             return {'message':self.message(self.row(uid,mid,key)),'streak':self.streak(key)}
         mid=int(data.get('message',0));row=self.row(uid,mid,key)
@@ -150,7 +150,7 @@ class Chat:
         if action=='chat_react':
             emoji=data.get('emoji')
             if emoji not in ('heart','like','laugh','wow','sad','fire'):raise SocialError('invalid_emoji')
-            self.db.execute('INSERT OR REPLACE INTO chat_reactions VALUES(?,?,?)',(mid,uid,emoji));return {'message':self.message(self.row(uid,mid,key))}
+            self.db.execute('INSERT INTO chat_reactions VALUES(?,?,?) ON CONFLICT(message,uid) DO UPDATE SET emoji=excluded.emoji',(mid,uid,emoji));return {'message':self.message(self.row(uid,mid,key))}
         if row['sender']!=uid:raise SocialError('owner_only')
         if action=='chat_edit':
             text=str(data.get('text','')).strip()
@@ -160,6 +160,7 @@ class Chat:
         else:raise SocialError('unknown_action')
         return {'message':self.message(self.row(uid,mid,key))}
     def upload(self,uid,kind,content):
+        if self.db.execute('SELECT COALESCE(SUM(length(data)),0) FROM chat_media').fetchone()[0]+len(content)>int(os.environ.get('CHAT_MEDIA_TOTAL_QUOTA',268435456)):raise SocialError('media_storage_full')
         if self.db.execute('SELECT COALESCE(SUM(length(data)),0) FROM chat_media WHERE owner=?',(uid,)).fetchone()[0]+len(content)>int(os.environ.get('CHAT_MEDIA_QUOTA',33554432)):raise SocialError('media_storage_full')
         if not content or len(content)>2*1024*1024:raise SocialError('media_too_large')
         if self.db.execute('SELECT COUNT(*) FROM chat_media WHERE owner=? AND created>?',(uid,self.clock()-60)).fetchone()[0]>=6:raise SocialError('upload_rate_limit')
