@@ -131,8 +131,20 @@ python -m unittest discover -v
 it refuses all remote hosts. Never use it against production. The SQL-only
 Supabase verification script rolls back its temporary rows.
 
-No Actions workflow, new APK build or paid-plan change was started for this
-migration. Only the separately authorized Free test service was deployed.
+The user-authorized APK workflow 37178127200 was started on
+`release/android-1.8-supabase`, client commit
+`1c6b35bf21f8246ac8c747411f0498f1f90dc983`. Native results are pending.
+No paid-plan change was made. The separate Free service was deployed at server
+commit `b3b0de68233735f1572a2b87afd51f3d64462d59`.
+Two real newly created legacy accounts then passed authenticated transfer:
+IDs, names, original tokens and friendship were retained; private Unicode
+chat delivered after both transfers. This does not verify recovery of all
+historical users or lost legacy sessions. Two-account text/photo/delivery
+release checks passed over real HTTPS. Local direct WSS checks reached room
+creation but failed with DNS errors; the workflow retains the live WSS gate.
+The private database login and session pooler were configured for the new
+service; the old deployment remains unchanged. The numbered backup steps
+above apply to a future full historical export, not the per-account route.
 Android delivery, camera/recording, closed-app FCM notifications and native 1.8
 startup remain separate unverified checks. The latest native smoke diagnostic
 timed out before DODGE_READY; a successful APK build does not resolve that.

@@ -4,6 +4,7 @@ Does not change deployments or export another player's data. Never logs tokens.
 """
 import requests
 import uuid
+import time
 
 OLD='https://dodge-server-uf4f.onrender.com'
 NEW='https://dodge-supabase-18.onrender.com'
@@ -11,8 +12,19 @@ NEW='https://dodge-supabase-18.onrender.com'
 
 def main():
     with requests.Session() as session:
+        # Wake the Free legacy instance using safe GETs before creating users.
+        deadline=time.monotonic()+120
+        while True:
+            try:
+                response=session.get(OLD+'/v2/health',timeout=(10,20))
+                response.raise_for_status()
+                assert response.json().get('ok') is True
+                break
+            except requests.RequestException:
+                if time.monotonic()>=deadline:raise
+                print('Waiting for legacy health; no account mutation retried',flush=True)
         def post(base,path,body,user=None):
-            response=session.post(base+path,json=body,timeout=(5,30),
+            response=session.post(base+path,json=body,timeout=(10,30),
                 headers={'Authorization':'Bearer '+user['token']} if user else {})
             result=response.json()
             assert response.status_code==200,(path,response.status_code,result.get('error'))
