@@ -99,7 +99,7 @@ def rollover_if_needed():
 
         players = con.execute(
             "SELECT uid,name,score,rank,rank_index FROM scores "
-            "ORDER BY rank_index DESC, score DESC, updated_at ASC LIMIT 100"
+            "ORDER BY rank_index DESC, score DESC, updated_at ASC, uid ASC LIMIT 100"
         ).fetchall()
         for place, player in enumerate(players, 1):
             reward = reward_for_place(place)
@@ -118,9 +118,26 @@ def leaderboard(limit=100):
     with DB_LOCK, db() as con:
         rows = con.execute(
             "SELECT uid,name,score,rank,rank_index FROM scores "
-            "ORDER BY rank_index DESC, score DESC, updated_at ASC LIMIT ?", (limit,)
+            "ORDER BY rank_index DESC, score DESC, updated_at ASC, uid ASC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def personal_ranking(uid):
+    """Read the existing monthly scoreboard for the authenticated social UID.
+
+    Never accept a client-provided device UID as an identity mapping. Legacy
+    submissions remain device-reported, not an authoritative anti-cheat score.
+    """
+    with DB_LOCK, db() as con:
+        month=con.execute("SELECT value FROM meta WHERE key='current_month'").fetchone()
+        month=month[0] if month else month_key()
+        # Read-only: avoid serving the previous month's position during rollover.
+        if month!=month_key():return {'position':None,'participating':False,'month':month_key(),'source':'legacy_leaderboard'}
+        row=con.execute('SELECT uid,score,rank,rank_index,updated_at FROM scores WHERE uid=?',(uid,)).fetchone()
+        if not row:return {'position':None,'participating':False,'month':month,'source':'legacy_leaderboard'}
+        ahead=con.execute('SELECT COUNT(*) FROM scores WHERE rank_index>? OR (rank_index=? AND score>?) OR (rank_index=? AND score=? AND updated_at<?) OR (rank_index=? AND score=? AND updated_at=? AND uid<?)',(row['rank_index'],row['rank_index'],row['score'],row['rank_index'],row['score'],row['updated_at'],row['rank_index'],row['score'],row['updated_at'],uid)).fetchone()[0]
+        return {'position':ahead+1,'participating':True,'month':month,'score':row['score'],'rank':row['rank'],'rank_index':row['rank_index'],'source':'legacy_leaderboard'}
 
 
 def submit(payload):

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from social import SocialError
 
 TZ='Asia/Qyzylorda'
-DEFAULTS={'avatar':0,'requests':True,'online':True,'receipts':True,'messages':True,'friend_notifications':True,'streak_notifications':True,'preview':False,'language':'en','quiet_start':22,'quiet_end':8,'quiet':False,'style':0,'flame':0,'color':'orange','badge':'star'}
+DEFAULTS={'avatar':0,'requests':True,'online':True,'receipts':True,'messages':True,'friend_notifications':True,'streak_notifications':True,'preview':False,'language':'en','quiet_start':22,'quiet_end':8,'quiet':False,'style':0,'flame':0,'color':'orange','badge':'star','invites':'friends','writes':'friends','status':''}
 
 class Chat:
     def __init__(self,social,clock=time.time):
@@ -37,8 +37,8 @@ class Chat:
         if self.blocked(uid,other):raise SocialError('blocked')
         a,b=sorted((uid,other));key=a+':'+b
         self.db.execute('INSERT INTO chat_pairs(pair,a,b) VALUES(?,?,?) ON CONFLICT DO NOTHING',(key,a,b));return key
-    def event(self,key,uid,kind,payload):
-        self.db.execute('INSERT INTO chat_events VALUES(?,?,?,?,?,0) ON CONFLICT DO NOTHING',(key,uid,kind,json.dumps(payload),self.clock()))
+    def event(self,key,uid,kind,payload,notify=True):
+        self.db.execute('INSERT INTO chat_events VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING',(key,uid,kind,json.dumps(payload),self.clock(),0 if notify else 1))
     def streak(self,key):
         now=datetime.fromtimestamp(self.clock(),ZoneInfo(TZ));today=now.date();a,b=key.split(':')
         rows=self.db.execute('SELECT day,COUNT(*) FROM chat_days WHERE pair=? GROUP BY day HAVING COUNT(*)=2 ORDER BY day DESC LIMIT 36600',(key,)).fetchall()
@@ -72,6 +72,9 @@ class Chat:
                 if type(DEFAULTS[key]) is bool and type(value) is not bool:raise SocialError('invalid_preference')
                 if key in ('quiet_start','quiet_end') and (type(value) is not int or not 0<=value<=23):raise SocialError('invalid_preference')
                 if key=='language' and value not in ('en','ru'):raise SocialError('invalid_preference')
+                if key=='invites' and value not in ('all','friends','nobody'):raise SocialError('invalid_preference')
+                if key=='writes' and value not in ('friends','nobody'):raise SocialError('invalid_preference')
+                if key=='status' and (not isinstance(value,str) or len(value)>80 or any(ord(c)<32 for c in value)):raise SocialError('invalid_preference')
                 if key=='avatar' and (type(value) is not int or not 0<=value<100):raise SocialError('invalid_avatar')
                 if key=='style' and (type(value) is not int or not 0<=value<50):raise SocialError('invalid_style')
                 if key=='flame' and (type(value) is not int or not 0<=value<12):raise SocialError('invalid_style')
@@ -81,6 +84,26 @@ class Chat:
                 p[key]=value
             self.db.execute('INSERT INTO chat_preferences VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET data=excluded.data',(uid,json.dumps(p)));return {'preferences':p,'chats':self.status(uid)}
         if action=='chat_list':return {'preferences':self.prefs(uid),'chats':self.status(uid),'requests':self.social.dispatch_requests(uid),'blocked':[self.social.profile(r[0]) for r in self.db.execute('SELECT target FROM chat_blocks WHERE owner=?',(uid,))]}
+        if action=='chat_mark_all_read':
+            count=0
+            for other in self.social.friend_ids(uid):
+                if self.blocked(uid,other):continue
+                key=self.pair(uid,other)
+                updated=self.db.execute('UPDATE chat_messages SET delivered=COALESCE(delivered,?) WHERE pair=? AND sender<>? AND delivered IS NULL',(self.clock(),key,uid))
+                count+=max(0,updated.rowcount)
+                if self.prefs(uid)['receipts']:
+                    self.db.execute('UPDATE chat_messages SET seen=COALESCE(seen,?) WHERE pair=? AND sender<>?',(self.clock(),key,uid))
+            return {'acknowledged':True,'count':count}
+        if action=='chat_saved':
+            messages=[]
+            for other in self.social.friend_ids(uid):
+                if self.blocked(uid,other):continue
+                key=self.pair(uid,other)
+                options=json.loads(self.db.execute('SELECT settings FROM chat_pairs WHERE pair=?',(key,)).fetchone()[0]).get(uid,{})
+                for mid in options.get('saved',[])[:200]:
+                    row=self.db.execute('SELECT * FROM chat_messages WHERE id=? AND pair=? AND deleted=0',(mid,key)).fetchone()
+                    if row:messages.append(dict(self.message(row),saved=True))
+            return {'messages':sorted(messages,key=lambda m:m['created'],reverse=True)[:200]}
         other=data.get('friend')
         if action=='chat_unblock':
             self.db.execute('DELETE FROM chat_blocks WHERE owner=? AND target=?',(uid,other));return {'unblocked':True}
@@ -106,8 +129,11 @@ class Chat:
         if action=='chat_fetch':
             before=int(data.get('before',2**62));query=str(data.get('query',''))[:128]
             rows=self.db.execute('SELECT * FROM chat_messages WHERE pair=? AND id<? AND (deleted=1 OR text LIKE ?) ORDER BY id DESC LIMIT 50',(key,before,'%'+query+'%')).fetchall()
-            return {'messages':[self.message(r) for r in reversed(rows)],'streak':self.streak(key),'preferences':self.prefs(uid),'peer_cosmetics':{k:self.prefs(other)[k] for k in ('flame','color','badge')},'quest':{'shared_results':self.db.execute("SELECT COUNT(*) FROM chat_messages WHERE pair=? AND kind='result' AND deleted=0",(key,)).fetchone()[0],'target':10}}
+            options=json.loads(self.db.execute('SELECT settings FROM chat_pairs WHERE pair=?',(key,)).fetchone()[0]).get(uid,{})
+            saved=set(options.get('saved',[]))
+            return {'messages':[dict(self.message(r),saved=r['id'] in saved) for r in reversed(rows)],'streak':self.streak(key),'preferences':self.prefs(uid),'peer_cosmetics':{k:self.prefs(other)[k] for k in ('flame','color','badge')},'quest':{'shared_results':self.db.execute("SELECT COUNT(*) FROM chat_messages WHERE pair=? AND kind='result' AND deleted=0",(key,)).fetchone()[0],'target':10}}
         if action=='chat_send':
+            if self.prefs(other)['writes']=='nobody':raise SocialError('messages_disabled')
             nonce=str(data.get('nonce',''))
             if not 8<=len(nonce)<=80:raise SocialError('invalid_nonce')
             duplicate=self.db.execute('SELECT * FROM chat_messages WHERE sender=? AND nonce=?',(uid,nonce)).fetchone()
@@ -141,6 +167,18 @@ class Chat:
             self.event('message:'+str(mid),other,'messages',{'sender':uid,'text':text if kind=='text' else kind,'pair':key})
             return {'message':self.message(self.row(uid,mid,key)),'streak':self.streak(key)}
         mid=int(data.get('message',0));row=self.row(uid,mid,key)
+        if action=='chat_save':
+            wanted=data.get('saved',True)
+            if type(wanted) is not bool or row['deleted']:raise SocialError('invalid_message')
+            settings=json.loads(self.db.execute('SELECT settings FROM chat_pairs WHERE pair=?',(key,)).fetchone()[0])
+            opts=settings.setdefault(uid,{})
+            saved=opts.setdefault('saved',[])
+            if wanted and mid not in saved:
+                if len(saved)>=200:raise SocialError('saved_full')
+                saved.append(mid)
+            elif not wanted and mid in saved:saved.remove(mid)
+            self.db.execute('UPDATE chat_pairs SET settings=? WHERE pair=?',(json.dumps(settings),key))
+            return {'saved':wanted,'message':dict(self.message(row),saved=wanted)}
         if action=='chat_report':
             reason=str(data.get('reason','')).strip()
             if not 3<=len(reason)<=300:raise SocialError('invalid_report')
@@ -183,6 +221,8 @@ class Chat:
         row=self.db.execute('SELECT * FROM chat_media WHERE id=?',(identifier,)).fetchone()
         if not row:raise SocialError('media_not_found')
         if row['owner']!=uid:
+            avatar=self.prefs(row['owner']).get('avatar_media')==identifier
+            if avatar and row['owner'] in self.social.friend_ids(uid) and not self.blocked(uid,row['owner']):return row['mime'],row['data']
             messages=self.db.execute('SELECT * FROM chat_messages WHERE text=? AND deleted=0 AND kind IN (\'photo\',\'voice\')',(identifier,)).fetchall()
             if not any(uid in m['pair'].split(':') and not self.blocked(uid,row['owner']) for m in messages):raise SocialError('unauthorized')
         return row['mime'],row['data']

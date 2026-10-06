@@ -5,6 +5,8 @@ This module does not yet simulate a multiplayer match.
 """
 from database import connect
 import hashlib
+import json
+import math
 import secrets
 import sqlite3
 import threading
@@ -75,7 +77,9 @@ class Social:
 
     def profile(self, uid):
         row = self.db.execute('SELECT id,name,name_locked FROM guests WHERE id=?', (uid,)).fetchone()
-        return dict(row,avatar=self.chat.prefs(uid)['avatar']) if row else None
+        if not row:return None
+        prefs=self.chat.prefs(uid)
+        return dict(row,avatar=prefs['avatar'],status=prefs['status'])
 
     def connected(self, uid):
         with self.realtime_lock:
@@ -126,7 +130,15 @@ class Social:
     def dispatch_requests(self,uid):
         return [self.profile(r['sender']) for r in self.db.execute('SELECT sender FROM friends WHERE recipient=? AND accepted=0',(uid,))]
 
+    def allow_invite(self, uid, other):
+        if not self.profile(other): raise SocialError('player_not_found')
+        if self.chat.blocked(uid,other): raise SocialError('blocked')
+        policy=self.chat.prefs(other)['invites']
+        if policy=='nobody' or (policy=='friends' and other not in self.friend_ids(uid)):
+            raise SocialError('invites_disabled')
+
     def dispatch_by_uid_invite(self,uid,other):
+        self.allow_invite(uid,other)
         rid,room=self.room_for(uid)
         if not room or room['host']!=uid or room.get('started') or len(room['members'])>=3:raise SocialError('room_required')
         if self.clock()-self.last_invite.get(uid,float('-inf'))<10:raise SocialError('invite_cooldown')
@@ -140,16 +152,63 @@ class Social:
             self.online[uid] = self.clock()
             if action.startswith('chat_'):
                 return dict(ok=True,**self.chat.dispatch(uid,action,data))
-            if action == 'name':
+            if action == 'profile_avatar':
+                if set(data)!={'media'}:raise SocialError('invalid_avatar')
+                media=data.get('media')
+                if media is not None:
+                    if not isinstance(media,str) or len(media)!=32:raise SocialError('invalid_avatar')
+                    row=self.db.execute('SELECT owner,kind FROM chat_media WHERE id=?',(media,)).fetchone()
+                    if not row or row['owner']!=uid or row['kind']!='photo':raise SocialError('invalid_avatar')
+                prefs=self.chat.prefs(uid);prefs['avatar_media']=media
+                self.db.execute('INSERT INTO chat_preferences VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET data=excluded.data',(uid,json.dumps(prefs)))
+                return {'ok':True,'avatar_media':media,'visibility':'friends'}
+            elif action == 'profile_stats':
+                allowed={'stats_runs':10000000,'stats_victories':10000000,'stats_enemies_defeated':1000000000,'stats_playtime_seconds':315360000,'level':10000}
+                stats=data.get('stats')
+                if set(data)!={'stats'} or not isinstance(stats,dict) or not stats or not set(stats)<=set(allowed):raise SocialError('invalid_stats')
+                for key,value in stats.items():
+                    if type(value) not in ((int,float) if key=='stats_playtime_seconds' else (int,)) or not (1 if key=='level' else 0)<=value<=allowed[key] or not math.isfinite(value):raise SocialError('invalid_stats')
+                prefs=self.chat.prefs(uid)
+                prefs['profile_stats']=dict(prefs.get('profile_stats',{}),**stats)
+                prefs['stats_updated_at']=self.chat.clock()
+                self.db.execute('INSERT INTO chat_preferences VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET data=excluded.data',(uid,json.dumps(prefs)))
+                return {'ok':True,'stats':prefs['profile_stats'],'stats_source':'device','stats_updated_at':prefs['stats_updated_at']}
+            elif action == 'my_ranking':
+                if data:raise SocialError('invalid_request')
+                from online_server_render import personal_ranking
+                return {'ok':True,'ranking':personal_ranking(uid)}
+            elif action == 'profile_lookup':
+                other=data.get('id')
+                if not other:
+                    _, key=self.name_key(data.get('name',''))
+                    row=self.db.execute('SELECT id FROM guests WHERE name_key=?',(key,)).fetchone()
+                    other=row[0] if row else None
+                profile=self.profile(other)
+                if not profile or self.chat.blocked(uid,other):raise SocialError('player_not_found')
+                prefs=self.chat.prefs(other)
+                result=dict(profile,online=self.connected(other) and prefs['online'])
+                if other==uid or other in self.friend_ids(uid):
+                    result.update(stats=prefs.get('profile_stats',{}),stats_source='device',stats_updated_at=prefs.get('stats_updated_at'),avatar_media=prefs.get('avatar_media'))
+                return {'ok':True,'profile':result}
+            elif action == 'recent_players':
+                peers={}
+                for row in self.db.execute("SELECT payload,created FROM chat_events WHERE uid=? AND kind='recent_match' ORDER BY created DESC LIMIT 100",(uid,)):
+                    for other in json.loads(row[0])['players']:
+                        if other!=uid and other not in peers and not self.chat.blocked(uid,other):
+                            peers[other]=dict(self.profile(other),played_at=row[1])
+                return {'ok':True,'players':list(peers.values())[:50]}
+            elif action in ('name','name_rename'):
                 name, key = self.name_key(data.get('name', ''))
-                if self.profile(uid)['name_locked']:
+                if action=='name' and self.profile(uid)['name_locked']:
                     raise SocialError('name_locked')
+                if action=='name_rename' and self.db.execute("SELECT 1 FROM chat_events WHERE uid=? AND kind='name_rename' AND created>?",(uid,self.chat.clock()-86400)).fetchone():raise SocialError('rename_cooldown')
                 if self.db.execute('SELECT 1 FROM guests WHERE name_key=? AND id<>?', (key, uid)).fetchone():
                     raise SocialError('name_taken')
                 try:
                     self.db.execute('UPDATE guests SET name=?,name_key=?,name_locked=1 WHERE id=?', (name, key, uid))
                 except sqlite3.IntegrityError:
                     raise SocialError('name_taken')
+                if action=='name_rename':self.chat.event('rename:'+secrets.token_hex(12),uid,'name_rename',{'name':name},notify=False)
             elif action == 'friend_add':
                 _, key = self.name_key(data.get('name', ''))
                 other = self.db.execute('SELECT id FROM guests WHERE name_key=?', (key,)).fetchone()
@@ -208,16 +267,21 @@ class Social:
                 # readiness only after a player explicitly opts into that flow.
                 if room.get('ready_required') and not all(room['ready'].get(u,False) for u in room['members']):
                     raise SocialError('team_not_ready')
+                if not room.get('started'):
+                    event=secrets.token_hex(12)
+                    for member in room['members']:
+                        self.chat.event('recent:'+event+':'+member,member,'recent_match',{'players':list(room['members'])},notify=False)
                 room['started'] = True
             elif action == 'invite':
                 rid, room = self.room_for(uid)
                 other = data.get('id')
+                self.allow_invite(uid,other)
                 if not room or room['host'] != uid:
                     raise SocialError('host_only')
                 if room.get('started'):raise SocialError('room_started')
                 if len(room['members']) >= 3:
                     raise SocialError('room_full')
-                if other not in self.friend_ids(uid) or not self.connected(other):
+                if not self.connected(other):
                     raise SocialError('friend_offline')
                 if self.room_for(other)[1] is not None:
                     raise SocialError('player_busy')
