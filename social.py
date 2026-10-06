@@ -20,6 +20,11 @@ class Social:
     def __init__(self, path, clock=time.monotonic):
         self.clock = clock
         self.lock = threading.RLock()
+        # SQL/lobby operations own self.lock. Match frames must never wait for SQL.
+        # Lock order: social.lock -> realtime_lock -> MatchHub.lock.
+        self.realtime_lock = threading.RLock()
+        self.realtime_membership = {}
+        self.realtime_online = {}
         self.db = connect(path, persistent=True)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
@@ -73,7 +78,27 @@ class Social:
         return dict(row,avatar=self.chat.prefs(uid)['avatar']) if row else None
 
     def connected(self, uid):
-        return self.clock() - self.online.get(uid, float('-inf')) < 30
+        with self.realtime_lock:
+            seen = max(self.online.get(uid, float('-inf')),
+                       self.realtime_online.get(uid, float('-inf')))
+        return self.clock() - seen < 30
+
+    def publish_realtime_membership(self):
+        """Caller owns social.lock; publish immutable authorization data without SQL."""
+        membership = {}
+        for rid, room in self.rooms.items():
+            members = tuple(room['members'])
+            access = (rid, room['host'], bool(room.get('started')), members)
+            for uid in members:
+                membership[uid] = access
+        with self.realtime_lock:
+            self.realtime_membership = membership
+            self.realtime_online = {u:t for u,t in self.realtime_online.items()
+                                    if u in membership}
+
+    def realtime_access(self, uid):
+        # WSS owns realtime_lock across validation plus authoritative mutation.
+        return self.realtime_membership.get(uid)
 
     def cleanup(self):
         now = self.clock()
@@ -86,6 +111,7 @@ class Social:
                 room['host'] = room['members'][0]
         self.online = {u: t for u, t in self.online.items() if now-t < 60}
         self.last_invite = {u: t for u, t in self.last_invite.items() if now-t < 60}
+        self.publish_realtime_membership()
 
     def room_for(self, uid):
         for rid, room in self.rooms.items():
@@ -224,6 +250,7 @@ class Social:
                 self.cleanup()
             elif action != 'poll':
                 raise SocialError('unknown_action')
+            self.publish_realtime_membership()
             rid, room = self.room_for(uid)
             return {'ok': True, 'profile': self.profile(uid),
                     'friends': [dict(self.profile(u), online=self.connected(u) and self.chat.prefs(u)['online']) for u in self.friend_ids(uid)],

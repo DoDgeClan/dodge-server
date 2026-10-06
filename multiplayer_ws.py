@@ -286,32 +286,39 @@ def websocket_loop(handler, hub, social):
             raise ValueError("room_required")
         if not social_room.get('started'):
             raise ValueError('host_must_start')
-        members = list(social_room['members'])
     key=handler.headers.get("Sec-WebSocket-Key")
     if not key:raise ValueError("websocket_key_required")
     accept=base64.b64encode(hashlib.sha1((key+GUID).encode()).digest()).decode()
     handler.send_response(101,"Switching Protocols")
     handler.send_header("Upgrade","websocket");handler.send_header("Connection","Upgrade");handler.send_header("Sec-WebSocket-Accept",accept);handler.end_headers()
     conn=handler.connection;conn.settimeout(.10)
-    hub.join(room_id, uid, host_uid=social_room.get('host'), started=True, expected_members=members)
+    with social.realtime_lock:
+        access = social.realtime_access(uid)
+        if not access or access[0] != room_id or not access[2]:
+            raise ValueError('room_required')
+        hub.join(room_id, uid, host_uid=access[1], started=True, expected_members=access[3])
     reader = FrameReader()
     try:
         while True:
-            with social.lock:
-                if social.room_for(uid)[0] != room_id:
+            # Read outside authorization lock: a slow mobile socket cannot block revocation.
+            message=reader.read(conn)
+            if message is None:break
+            with social.realtime_lock:
+                access=social.realtime_access(uid)
+                if not access or access[0] != room_id or not access[2]:
                     with hub.lock:
                         match=hub.rooms.get(room_id)
                         if match:match['players'].pop(uid,None)
                     break
-                social.online[uid] = social.clock()
-            message=reader.read(conn)
-            if message is None:break
-            if message:
-                try:
-                    hub.action(room_id,uid,json.loads(message))
-                except (ValueError,TypeError):
-                    pass
-            write_frame(conn,json.dumps(hub.snapshot(room_id),separators=(",",":")))
+                social.realtime_online[uid] = social.clock()
+                if message:
+                    try:
+                        hub.action(room_id,uid,json.loads(message))
+                    except (ValueError,TypeError):
+                        pass
+                state=hub.snapshot(room_id)
+            # No SQL, realtime or match lock held during a potentially slow send.
+            write_frame(conn,json.dumps(state,separators=(",",":")))
     except (OSError, ValueError):
         pass
     finally:

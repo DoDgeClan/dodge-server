@@ -41,7 +41,7 @@ def player(social, row):
 
 
 def get(path, query, social, matches):
-    # Lock order matches websocket_loop: social first, match hub second.
+    # Lock order: social first; realtime publication before match mutation.
     with social.lock, social.db:
         social.cleanup()
         if path == '/v2/admin/status':
@@ -73,19 +73,21 @@ def get(path, query, social, matches):
                     'next_offset': offset + limit if offset + limit < total else None}
         if path == '/v2/admin/rooms':
             result = []
-            with matches.lock:
-                for rid, room in list(social.rooms.items())[:200]:
+            for rid, room in list(social.rooms.items())[:200]:
+                # Copy only match flags under its lock; profile SQL must not stall matches.
+                with matches.lock:
                     match = matches.rooms.get(rid)
-                    members = []
-                    for uid in room['members']:
-                        row = social.db.execute('SELECT id,name,name_locked FROM guests WHERE id=?',
-                                                (uid,)).fetchone()
-                        if row:
-                            members.append(player(social, row))
-                    result.append({'id': rid, 'host': room['host'], 'started': bool(room.get('started')),
-                                   'members': members, 'match': None if not match else {
-                                       'started': bool(match.get('started')), 'ended': bool(match.get('ended')),
-                                       'victory': bool(match.get('victory'))}})
+                    flags = None if not match else {
+                        'started': bool(match.get('started')), 'ended': bool(match.get('ended')),
+                        'victory': bool(match.get('victory'))}
+                members = []
+                for uid in room['members']:
+                    row = social.db.execute('SELECT id,name,name_locked FROM guests WHERE id=?',
+                                            (uid,)).fetchone()
+                    if row:
+                        members.append(player(social, row))
+                result.append({'id': rid, 'host': room['host'], 'started': bool(room.get('started')),
+                               'members': members, 'match': flags})
             return {'ok': True, 'rooms': result, 'total': len(social.rooms),
                     'truncated': len(social.rooms) > 200}
     raise AdminError('admin_endpoint_not_found', 404)
@@ -128,6 +130,7 @@ def action(data, social, matches):
                     room['host'] = room['members'][0]
             else:
                 social.rooms.pop(rid, None)
+            social.publish_realtime_membership()
             with matches.lock:
                 match = matches.rooms.get(rid)
                 if match:
@@ -146,6 +149,7 @@ def action(data, social, matches):
                 raise AdminError('room_not_found', 404)
             social.rooms.pop(target)
             social.invites = {k: v for k, v in social.invites.items() if v['room'] != target}
+            social.publish_realtime_membership()
             with matches.lock:
                 match = matches.rooms.get(target)
                 if match:
