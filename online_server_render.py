@@ -123,21 +123,29 @@ def leaderboard(limit=100):
         return [dict(r) for r in rows]
 
 
-def personal_ranking(uid):
+def personal_ranking(uid, connection=None):
     """Read the existing monthly scoreboard for the authenticated social UID.
 
     Never accept a client-provided device UID as an identity mapping. Legacy
     submissions remain device-reported, not an authoritative anti-cheat score.
     """
+    if connection is not None:
+        # Social.dispatch already owns the PostgreSQL advisory transaction lock.
+        # A second DB connection would block on that same lock until timeout.
+        return _personal_ranking_read(uid,connection)
     with DB_LOCK, db() as con:
-        month=con.execute("SELECT value FROM meta WHERE key='current_month'").fetchone()
-        month=month[0] if month else month_key()
-        # Read-only: avoid serving the previous month's position during rollover.
-        if month!=month_key():return {'position':None,'participating':False,'month':month_key(),'source':'legacy_leaderboard'}
-        row=con.execute('SELECT uid,score,rank,rank_index,updated_at FROM scores WHERE uid=?',(uid,)).fetchone()
-        if not row:return {'position':None,'participating':False,'month':month,'source':'legacy_leaderboard'}
-        ahead=con.execute('SELECT COUNT(*) FROM scores WHERE rank_index>? OR (rank_index=? AND score>?) OR (rank_index=? AND score=? AND updated_at<?) OR (rank_index=? AND score=? AND updated_at=? AND uid<?)',(row['rank_index'],row['rank_index'],row['score'],row['rank_index'],row['score'],row['updated_at'],row['rank_index'],row['score'],row['updated_at'],uid)).fetchone()[0]
-        return {'position':ahead+1,'participating':True,'month':month,'score':row['score'],'rank':row['rank'],'rank_index':row['rank_index'],'source':'legacy_leaderboard'}
+        return _personal_ranking_read(uid,con)
+
+
+def _personal_ranking_read(uid,con):
+    month=con.execute("SELECT value FROM meta WHERE key='current_month'").fetchone()
+    month=month[0] if month else month_key()
+    # Read-only: avoid serving the previous month's position during rollover.
+    if month!=month_key():return {'position':None,'participating':False,'month':month_key(),'source':'legacy_leaderboard'}
+    row=con.execute('SELECT uid,score,rank,rank_index,updated_at FROM scores WHERE uid=?',(uid,)).fetchone()
+    if not row:return {'position':None,'participating':False,'month':month,'source':'legacy_leaderboard'}
+    ahead=con.execute('SELECT COUNT(*) FROM scores WHERE rank_index>? OR (rank_index=? AND score>?) OR (rank_index=? AND score=? AND updated_at<?) OR (rank_index=? AND score=? AND updated_at=? AND uid<?)',(row['rank_index'],row['rank_index'],row['score'],row['rank_index'],row['score'],row['updated_at'],row['rank_index'],row['score'],row['updated_at'],uid)).fetchone()[0]
+    return {'position':ahead+1,'participating':True,'month':month,'score':row['score'],'rank':row['rank'],'rank_index':row['rank_index'],'source':'legacy_leaderboard'}
 
 
 def submit(payload):

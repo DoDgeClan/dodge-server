@@ -3,7 +3,7 @@
 Persistent identities/friendships use SQLite. Room expiry is server authoritative.
 This module does not yet simulate a multiplayer match.
 """
-from database import connect
+from database import connect, Postgres
 import hashlib
 import json
 import math
@@ -176,7 +176,7 @@ class Social:
             elif action == 'my_ranking':
                 if data:raise SocialError('invalid_request')
                 from online_server_render import personal_ranking
-                return {'ok':True,'ranking':personal_ranking(uid)}
+                return {'ok':True,'ranking':personal_ranking(uid,connection=self.db if isinstance(self.db,Postgres) else None)}
             elif action == 'profile_lookup':
                 other=data.get('id')
                 if not other:

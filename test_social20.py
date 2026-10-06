@@ -110,6 +110,20 @@ class ProfileData20Tests(unittest.TestCase):
         self.act(0,'friend_remove',id=self.users[1]['id'])
         with self.assertRaisesRegex(SocialError,'unauthorized'):self.s.chat.download(self.users[1]['id'],media)
 
+    def test_postgres_ranking_reuses_authorized_transaction(self):
+        import online_server_render as server
+        from unittest.mock import patch
+        old=server.DB_FILE;server.DB_FILE=self.path
+        try:
+            server.init_db()
+            server.submit({'uid':self.users[0]['id'],'name':'Me','rank_index':1,'score':42})
+            # Route this real transaction connection as PostgreSQL, and reject
+            # opening any second leaderboard connection while dispatch owns it.
+            with patch('social.Postgres',type(self.s.db)),patch('online_server_render.db',side_effect=AssertionError('second connection would self-deadlock')):
+                ranking=self.act(0,'my_ranking')['ranking']
+            self.assertEqual(ranking['position'],1);self.assertEqual(ranking['score'],42)
+        finally:server.DB_FILE=old
+
     def test_ranking_reads_authenticated_identity_actual_rows(self):
         import online_server_render as server
         old=server.DB_FILE;server.DB_FILE=os.path.join(self.tmp.name,'scores.db')
