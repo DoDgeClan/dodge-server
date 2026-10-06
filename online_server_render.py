@@ -21,6 +21,7 @@ import time
 from contextlib import contextmanager
 from social import Social, SocialError
 from multiplayer_ws import MatchHub, websocket_loop
+from admin_api import authorize as admin_authorize, get as admin_get, action as admin_action, verify_startup, AdminError
 
 HOST = os.environ.get("DODGE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", os.environ.get("DODGE_PORT", "8765")))
@@ -181,7 +182,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if not urlparse(self.path).path.startswith('/v2/admin/'):
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -195,6 +198,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
+            if parsed.path.startswith('/v2/admin/'):
+                admin_authorize(self.headers)
+                return self.send_json(200, admin_get(parsed.path, parse_qs(parsed.query), SOCIAL, MATCHES))
             if parsed.path == "/ws" and self.headers.get("Upgrade", "").lower() == "websocket":
                 websocket_loop(self, MATCHES, SOCIAL)
                 return
@@ -215,6 +221,8 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int(qs.get("limit", [100])[0])
                 return self.send_json(200, {"ok": True, "month": month_key(), "players": leaderboard(limit)})
             return self.send_json(404, {"ok": False, "error": "not found"})
+        except AdminError as e:
+            self.send_json(e.status, {'ok': False, 'error': str(e)})
         except SocialError as e:
             self.send_json(401 if str(e)=='unauthorized' else 409,{'ok':False,'error':str(e)})
         except Exception as e:
@@ -225,6 +233,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             parsed=urlparse(self.path)
+            if parsed.path.startswith('/v2/admin/'):
+                admin_authorize(self.headers)
+                if parsed.path != '/v2/admin/action':
+                    raise AdminError('admin_endpoint_not_found', 404)
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 4096:
+                    raise AdminError('invalid_admin_payload')
+                if not self.headers.get('Content-Type', '').startswith('application/json'):
+                    raise AdminError('json_required', 415)
+                self.connection.settimeout(10)
+                try:
+                    payload = json.loads(self.rfile.read(length).decode('utf-8'))
+                except (ValueError, UnicodeDecodeError):
+                    raise AdminError('invalid_admin_payload') from None
+                return self.send_json(200, admin_action(payload, SOCIAL, MATCHES))
             length=int(self.headers.get('Content-Length','0'))
             if parsed.path in ('/v2/upload/photo','/v2/upload/voice'):
                 if not 0<length<=2097152:raise SocialError('media_too_large')
@@ -269,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/claim":
                 return self.send_json(200, claim(payload))
             return self.send_json(404, {"ok": False, "error": "not found"})
+        except AdminError as e:
+            self.send_json(e.status, {'ok': False, 'error': str(e)})
         except SocialError as e:
             self.send_json(401 if str(e) == "unauthorized" else 409, {"ok": False, "error": str(e)})
         except (ValueError, json.JSONDecodeError) as e:
@@ -291,4 +316,6 @@ if __name__ == "__main__":
     PUSH=Push(SOCIAL);PUSH.start()
     print(f"Dodge leaderboard server: http://{HOST}:{PORT}")
     print("Top 100 monthly rewards: #1=2000, #2=1500, #3=1000, #4-100=700")
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    threading.Thread(target=verify_startup, args=(httpd.server_port,), daemon=True).start()
+    httpd.serve_forever()
