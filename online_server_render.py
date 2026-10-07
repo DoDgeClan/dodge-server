@@ -287,7 +287,12 @@ class Handler(BaseHTTPRequestHandler):
             if length < 0:
                 return self.send_json(400, {"ok": False, "error": "invalid length"})
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if not isinstance(payload,dict):raise SocialError('invalid_request')
             parsed = urlparse(self.path)
+            if parsed.path == '/v2/account':
+                auth=self.headers.get('Authorization','')
+                token=auth[7:] if auth.startswith('Bearer ') else ''
+                return self.send_json(200,SOCIAL.accounts.dispatch(payload.get('action'),payload.get('data',{}),token,self.client_address[0]))
             if parsed.path == "/v2/register":
                 with SOCIAL.lock:
                     return self.send_json(200, SOCIAL.register())

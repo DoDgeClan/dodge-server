@@ -45,6 +45,8 @@ class Social:
         self.last_invite = {}
         from chat import Chat
         self.chat=Chat(self)
+        from accounts import Accounts
+        self.accounts=Accounts(self)
 
     @staticmethod
     def name_key(name):
@@ -72,7 +74,9 @@ class Social:
         row = self.db.execute('SELECT id FROM guests WHERE token_hash=?',
                               (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
         if not row:
-            raise SocialError('unauthorized')
+            row=self.db.execute('SELECT uid AS id FROM account_sessions WHERE token_hash=? AND expires>?',
+                (hashlib.sha256(token.encode()).hexdigest(),time.time())).fetchone()
+            if not row:raise SocialError('unauthorized')
         return row['id']
 
     def profile(self, uid):
