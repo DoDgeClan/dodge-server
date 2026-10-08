@@ -21,6 +21,7 @@ import time
 from contextlib import contextmanager
 from social import Social, SocialError
 from multiplayer_ws import MatchHub, websocket_loop
+from developer_auth import login as developer_login
 from admin_api import authorize as admin_authorize, get as admin_get, action as admin_action, verify_startup, AdminError
 
 HOST = os.environ.get("DODGE_HOST", "0.0.0.0")
@@ -289,6 +290,11 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if not isinstance(payload,dict):raise SocialError('invalid_request')
             parsed = urlparse(self.path)
+            if parsed.path == '/v2/developer/login':
+                if length > 2048 or not self.headers.get('Content-Type','').startswith('application/json'):
+                    return self.send_json(400, {'ok':False,'error':'invalid_request'})
+                status,result=developer_login(payload)
+                return self.send_json(status,result)
             if parsed.path == '/v2/account':
                 auth=self.headers.get('Authorization','')
                 token=auth[7:] if auth.startswith('Bearer ') else ''
