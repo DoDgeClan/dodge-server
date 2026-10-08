@@ -259,6 +259,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             parsed=urlparse(self.path)
+            if parsed.path == '/v2/developer/login':
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<=2048 or not self.headers.get('Content-Type','').startswith('application/json'):
+                    return self.send_json(400, {'ok':False,'error':'invalid_request'})
+                self.connection.settimeout(10)
+                payload=json.loads(self.rfile.read(length).decode('utf-8'))
+                if not isinstance(payload,dict):return self.send_json(400,{'ok':False,'error':'invalid_request'})
+                status,result=developer_login(payload)
+                return self.send_json(status,result)
             if parsed.path.startswith('/v2/admin/'):
                 admin_authorize(self.headers)
                 if parsed.path != '/v2/admin/action':
@@ -290,11 +299,6 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if not isinstance(payload,dict):raise SocialError('invalid_request')
             parsed = urlparse(self.path)
-            if parsed.path == '/v2/developer/login':
-                if length > 2048 or not self.headers.get('Content-Type','').startswith('application/json'):
-                    return self.send_json(400, {'ok':False,'error':'invalid_request'})
-                status,result=developer_login(payload)
-                return self.send_json(status,result)
             if parsed.path == '/v2/account':
                 auth=self.headers.get('Authorization','')
                 token=auth[7:] if auth.startswith('Bearer ') else ''
