@@ -14,6 +14,7 @@ import struct
 import threading
 import time
 import copy
+from combat_projectiles import Boomerang,segment_distance
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -25,12 +26,16 @@ class MatchHub:
 
     def join(self, room_id, uid, host_uid=None, started=False, expected_members=None):
         with self.lock:
+            now=time.monotonic()
+            for rid,existing in list(self.rooms.items()):
+                if not any(p.get('connected',True) for p in existing['players'].values()) and now-existing.get('last_connection',now)>30:
+                    self.rooms.pop(rid,None)
             room = self.rooms.setdefault(room_id, {
                 "started": False, "updated": time.monotonic(),
                 "started_at": 0.0, "players": {}, "enemies": [], "next_enemy": 0,
                 "ended": False, "victory": False, "reason": "", "host_uid": host_uid or uid,
                 "expected": list(expected_members or []), "requested": False,
-                "decoys": {},
+                "decoys": {}, "boomerangs": [], "bullets": [], "connections": {}, "last_connection": now,
             })
             if host_uid:
                 room["host_uid"] = host_uid
@@ -39,6 +44,10 @@ class MatchHub:
             room["players"].setdefault(uid, {"x": 0.5, "y": 0.5, "dir": "idle", "hp": 3, "max_hp": 3, "kills": 0, "invulnerable_until": 0.0, "spectator": False})
             if expected_members and uid not in expected_members:
                 raise ValueError("not_in_room")
+            player=room['players'][uid]
+            player['connected']=True;player.pop('disconnected_at',None)
+            room['connections'][uid]=room['connections'].get(uid,0)+1
+            room['last_connection']=now
             room['requested'] = room['requested'] or started
             if room['requested'] and not room['started'] and all(u in room['players'] for u in room['expected']):
                 room["started"] = True
@@ -51,9 +60,11 @@ class MatchHub:
             room = self.rooms.get(room_id)
             if not room:
                 return
-            room["players"].pop(uid, None)
-            if not room["players"]:
-                self.rooms.pop(room_id, None)
+            room['connections'][uid]=max(0,room['connections'].get(uid,1)-1)
+            if not room['connections'][uid] and uid in room['players']:
+                room['players'][uid]['connected']=False
+                room['players'][uid]['disconnected_at']=time.monotonic()
+            room['last_connection']=time.monotonic()
 
     def action(self, room_id, uid, message):
         with self.lock:
@@ -64,6 +75,8 @@ class MatchHub:
             action = message.get("action")
             now = time.monotonic()
             if room['ended']:
+                return self.snapshot(room_id)
+            if player['hp']<=0 and action!='spectate':
                 return self.snapshot(room_id)
             if action == "start":
                 if uid != room.get("host_uid"):
@@ -83,6 +96,11 @@ class MatchHub:
                 if not room['started'] or now < player.get('attack_ready', 0):
                     return self.snapshot(room_id)
                 player['attack_ready'] = now + 6
+                if message.get('mode')=='boomerang':
+                    target=min(room['enemies'],key=lambda e:math.hypot(e['x']-player['x'],e['y']-player['y']),default=None)
+                    dx,dy=(target['x']-player['x'],target['y']-player['y']) if target else (0,1)
+                    room['boomerangs'].append((uid,Boomerang(player['x'],player['y'],dx,dy,.001)))
+                    return self.snapshot(room_id)
                 killed = 0
                 for enemy in room["enemies"][:]:
                     if math.hypot(enemy["x"]-player["x"], enemy["y"]-player["y"]) <= .20:
@@ -124,21 +142,28 @@ class MatchHub:
         if elapsed >= 180:
             room["ended"] = True; room["victory"] = True; room["reason"] = "Team survived"
             return
-        if now >= room["next_enemy"]:
+        if now >= room["next_enemy"] and len(room["enemies"])<32:
             room["next_enemy"] = now + max(.65, 1.45-min(.55, elapsed/180))
             angle = random.random()*math.tau
-            etype = "tank" if elapsed >= 45 and random.random() < .18 else "normal"
+            etype = "tank" if elapsed >= 45 and random.random() < .18 else "shooter" if elapsed>=60 and random.random()<.15 else "normal"
             hp = 3 if etype == "tank" else 1
             room["enemies"].append({"id": random.randrange(1_000_000_000), "x": .5+math.cos(angle)*.48, "y": .5+math.sin(angle)*.42, "type": etype, "hp": hp, "max_hp": hp, "dir": "idle"})
-        targets = [p for p in room["players"].values() if p['hp'] > 0]
+        for uid,player in list(room['players'].items()):
+            if not player.get('connected',True) and now-player.get('disconnected_at',now)>20:
+                room['players'].pop(uid,None);room['connections'].pop(uid,None)
+        targets = [p for p in room['players'].values() if p['hp']>0 and p.get('connected',True)]
         room['decoys'] = {u:d for u,d in room['decoys'].items() if d['until'] > now}
         if not targets:
-            room['ended'] = True; room['reason'] = 'The whole team was defeated'
-            return
-        for enemy in room["enemies"]:
+            if any(p['hp']>0 for p in room['players'].values()):return
+            room['ended']=True;room['reason']='The whole team was defeated';return
+        self._combat_tick(room,dt,now)
+        for enemy in room["enemies"][:]:
             target = min(list(room['decoys'].values()) or targets, key=lambda p: math.hypot(enemy["x"]-p["x"], enemy["y"]-p["y"]))
             dx,dy=target["x"]-enemy["x"],target["y"]-enemy["y"]
             dist=max(1e-5,math.hypot(dx,dy));speed=.075 if enemy["type"] == "tank" else .10;enemy["x"]+=dx/dist*speed*dt;enemy["y"]+=dy/dist*speed*dt
+            if enemy['type']=='shooter' and 'hp' in target and now>=enemy.get('next_shot',0):
+                enemy['next_shot']=now+3.5
+                if len(room['bullets'])<64:room['bullets'].append({'x':enemy['x'],'y':enemy['y'],'vx':dx/dist*.14,'vy':dy/dist*.14,'until':now+7,'owner':None})
             if 'hp' in target and dist < .105 and now >= target.get("invulnerable_until", 0):
                 if now < target.get('shield_until', 0): target['shield_until'] = 0
                 else: target["hp"] = max(0, target["hp"]-1)
@@ -146,13 +171,43 @@ class MatchHub:
         if targets and all(p["hp"] <= 0 for p in targets):
             room["ended"] = True; room["reason"] = "The whole team was defeated"
 
+    def _combat_tick(self,room,dt,now):
+        def damage(enemy,owner):
+            if enemy not in room['enemies']:return
+            enemy['hp']-=1
+            if enemy['hp']<=0:
+                room['enemies'].remove(enemy)
+                if owner in room['players']:room['players'][owner]['kills']+=1
+        for owner,boomerang in room['boomerangs'][:]:
+            player=room['players'].get(owner)
+            if not player:room['boomerangs'].remove((owner,boomerang));continue
+            segment=boomerang.step(dt,(player['x'],player['y']))
+            for enemy in room['enemies'][:]:
+                if boomerang.hit(enemy['id'],enemy['x'],enemy['y'],.045,segment):damage(enemy,owner)
+            if boomerang.dead:room['boomerangs'].remove((owner,boomerang))
+        for bullet in room['bullets'][:]:
+            previous=(bullet['x'],bullet['y']);bullet['x']+=bullet['vx']*dt;bullet['y']+=bullet['vy']*dt
+            if now>=bullet['until'] or not -.05<bullet['x']<1.05 or not -.05<bullet['y']<1.05:room['bullets'].remove(bullet);continue
+            if bullet['owner'] is not None:
+                for enemy in room['enemies'][:]:
+                    if segment_distance(enemy['x'],enemy['y'],*previous,bullet['x'],bullet['y'])<.055:
+                        damage(enemy,bullet['owner']);room['bullets'].remove(bullet);break
+            else:
+                for uid,player in room['players'].items():
+                    if player['hp']<=0 or not player.get('connected',True):continue
+                    distance=segment_distance(player['x'],player['y'],*previous,bullet['x'],bullet['y'])
+                    if now<player.get('shield_until',0) and distance<.09:
+                        player['shield_until']=0;player['invulnerable_until']=now+.65;bullet['owner']=uid;bullet['vx']*=-1;bullet['vy']*=-1;bullet['x'],bullet['y']=previous;break
+                    if distance<.025 and now>=player.get('invulnerable_until',0):
+                        player['hp']=max(0,player['hp']-1);player['invulnerable_until']=now+.85;room['bullets'].remove(bullet);break
+
     def snapshot(self, room_id):
         with self.lock:
             room=self.rooms.get(room_id)
             if not room:return {"ok":False,"error":"room_closed"}
             self._tick(room)
             elapsed=max(0.0,time.monotonic()-room["started_at"]) if room["started"] else 0.0
-            return copy.deepcopy({"ok":True,"room_id":room_id,"started":room["started"],"ended":room["ended"],"victory":room["victory"],"reason":room["reason"],"elapsed":int(elapsed),"wave":min(6,int(elapsed//30)+1),"players":room["players"],"enemies":room["enemies"],"decoys":room['decoys']})
+            return copy.deepcopy({"ok":True,"room_id":room_id,"started":room["started"],"ended":room["ended"],"victory":room["victory"],"reason":room["reason"],"elapsed":int(elapsed),"wave":min(6,int(elapsed//30)+1),"players":room["players"],"enemies":room["enemies"],"decoys":room['decoys'],"combat_features":["boomerang","reflect"],"boomerangs":[{"owner":uid,"x":b.x,"y":b.y,"returning":b.returning} for uid,b in room['boomerangs']],"bullets":room['bullets']})
 
 
 def _read_exact(conn, size):
@@ -231,29 +286,41 @@ def websocket_loop(handler, hub, social):
             raise ValueError("room_required")
         if not social_room.get('started'):
             raise ValueError('host_must_start')
-        members = list(social_room['members'])
     key=handler.headers.get("Sec-WebSocket-Key")
     if not key:raise ValueError("websocket_key_required")
     accept=base64.b64encode(hashlib.sha1((key+GUID).encode()).digest()).decode()
     handler.send_response(101,"Switching Protocols")
     handler.send_header("Upgrade","websocket");handler.send_header("Connection","Upgrade");handler.send_header("Sec-WebSocket-Accept",accept);handler.end_headers()
     conn=handler.connection;conn.settimeout(.10)
-    hub.join(room_id, uid, host_uid=social_room.get('host'), started=True, expected_members=members)
+    with social.realtime_lock:
+        access = social.realtime_access(uid)
+        if not access or access[0] != room_id or not access[2]:
+            raise ValueError('room_required')
+        hub.join(room_id, uid, host_uid=access[1], started=True, expected_members=access[3])
     reader = FrameReader()
     try:
         while True:
-            with social.lock:
-                if social.room_for(uid)[0] != room_id: break
-                social.online[uid] = social.clock()
+            # Read outside authorization lock: a slow mobile socket cannot block revocation.
             message=reader.read(conn)
             if message is None:break
-            if message:
-                try:
-                    hub.action(room_id,uid,json.loads(message))
-                except (ValueError,TypeError):
-                    pass
-            write_frame(conn,json.dumps(hub.snapshot(room_id),separators=(",",":")))
+            with social.realtime_lock:
+                access=social.realtime_access(uid)
+                if not access or access[0] != room_id or not access[2]:
+                    with hub.lock:
+                        match=hub.rooms.get(room_id)
+                        if match:match['players'].pop(uid,None)
+                    break
+                social.realtime_online[uid] = social.clock()
+                if message:
+                    try:
+                        hub.action(room_id,uid,json.loads(message))
+                    except (ValueError,TypeError):
+                        pass
+                state=hub.snapshot(room_id)
+            # No SQL, realtime or match lock held during a potentially slow send.
+            write_frame(conn,json.dumps(state,separators=(",",":")))
     except (OSError, ValueError):
         pass
     finally:
         hub.leave(room_id,uid)
+
